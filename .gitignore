@@ -1,3 +1,10 @@
+build/
+cmake-build-debug/
+.idea/
+.vscode/
+.clang-tidy
+CMakeLists.txt
+
 # Prerequisites
 *.d
 
