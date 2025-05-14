@@ -20,7 +20,7 @@ import logging
 from datetime import datetime
 from PIL import Image
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 from exiftool import ExifToolHelper
 from exiftool.exceptions import ExifToolExecuteError
@@ -92,9 +92,9 @@ def cprint(msg: str, level: str = "info") -> None:
 # ------------------------------------------------------------------------
 # util functions
 # ------------------------------------------------------------------------
-def get_mime(meta: dict) -> str:
+def get_mime(meta: dict) -> List[str]:
     """Return a top-level MIME type from metadata."""
-    return meta.get("File:MIMEType", "").split("/", 1)[0]
+    return meta.get("File:MIMEType", "").split("/", 1)
 
 
 def fname_from_ts(ts: str) -> str:
@@ -120,6 +120,20 @@ def ensure_unique(path: Path) -> Path:
         if not candidate.exists():
             return candidate
         i += 1
+
+
+def convert(src_path: Path):
+    jpg_path = src_path.with_suffix('.jpg')
+    unique_jpg = ensure_unique(jpg_path)
+
+    img = Image.open(src_path)
+
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+
+    img.save(unique_jpg, format="JPEG", quality=100, subsampling=0, optimize=False)
+    src_path.unlink()
+    return unique_jpg
 
 
 # ------------------------------------------------------------------------
@@ -210,9 +224,9 @@ def synchronise_file(
     """Copy one file atomically and sync all related metadata tags."""
     meta = et.get_metadata(str(src_file))[0]
     mime = get_mime(meta)
-    tag_map = STREAMS.get(mime)
+    tag_map = STREAMS.get(mime[0])
     if not tag_map:
-        raise RuntimeError(f"Unknown MIME '{mime}'")
+        raise RuntimeError(f"Unknown MIME '{mime[0]} with type '{mime[1]}'")
 
     if manual_ts:
         main_tag = "File:Manual"
@@ -226,6 +240,8 @@ def synchronise_file(
         if not main_val:
             raise RuntimeError(f"File has no tag {main_tag}")
 
+    old_vals = {tag: meta.get(tag) for tag in tag_map.values()}
+
     rel = src_file.relative_to(src_root)
     dst_dir = dst_root / rel.parent
     dst_dir.mkdir(parents=True, exist_ok=True)
@@ -234,24 +250,22 @@ def synchronise_file(
         base_name = src_file.stem + src_file.suffix.lower()
     else:
         base_name = fname_from_ts(main_val) + src_file.suffix.lower()
-    unique_final = ensure_unique(dst_dir / base_name)
-    unique_name = unique_final.name
-    new_path = unique_final
+    new_path = ensure_unique(dst_dir / base_name)
 
-    other_tags = {tag: main_val for tag in tag_map.values()}
-    other_tags["File:FileName"] = unique_name
-
-    old_vals = {tag: meta.get(tag) for tag in tag_map.values()}
     shutil.copy2(src_file, new_path)
+
+    if mime[1] != 'jpeg':
+        new_path = convert(new_path)
 
     if not _NO_WRITE_META:
         params = ["-overwrite_original", "-api", "QuickTimeUTC"]
+        other_tags = {tag: main_val for tag in tag_map.values()}
+        other_tags["File:FileName"] = new_path.name
+
         try:
             et.set_tags([str(new_path)], tags=other_tags, params=params)
         except ExifToolExecuteError:
-            new_path.unlink()
-            img = Image.open(src_file)
-            img.save(new_path, format="JPEG", quality=100, subsampling=0, optimize=False)
+            convert(new_path)
             try:
                 et.set_tags([str(new_path)], tags=other_tags, params=params)
             except ExifToolExecuteError:
@@ -284,7 +298,7 @@ def show_example_info(args):
     with ExifToolHelper() as et:
         meta = et.get_metadata(str(file_path))[0]
 
-    mime = get_mime(meta)
+    mime = get_mime(meta)[0]
     tag_map = STREAMS.get(mime, {})
 
     if args.type_key:
