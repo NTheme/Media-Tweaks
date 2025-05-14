@@ -72,7 +72,7 @@ STREAMS: Dict[str, Dict[str, str]] = {
 def setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
-        format="%(asctime)s [%(levelname)s] %(message)s", level=level
+        format="[%(levelname)s] %(message)s", level=level
     )
 
 
@@ -96,13 +96,9 @@ def get_mime(meta: dict) -> str:
     return meta.get("File:MIMEType", "").split("/", 1)[0]
 
 
-def format_timestamp(ts: str) -> str:
+def fname_from_ts(ts: str) -> str:
     """Normalize timestamp string to 'YYYYMMDD_HHMMSS' format."""
-    try:
-        dt = datetime.strptime(ts, '%Y:%m:%d %H:%M:%S')
-        return dt.strftime("%Y%m%d_%H%M%S")
-    except (ValueError, IndexError):
-        return ts.replace(":", "").replace(" ", "_")[:15]
+    return ts.replace(":", "").replace(" ", "_")[:15]
 
 
 def ts_from_fname(stem: str) -> str:
@@ -177,6 +173,7 @@ def parse_cli(argv: Optional[list[str]] = None):
         p.error("-a cannot be used with -t when -e is given")
 
     spath = Path(args.src_folder).expanduser()
+    spath = spath if spath.is_absolute() else Path(DEFAULT_SRC) / spath
     if not spath.exists():
         p.error(f"Source not found: {spath}")
     args.src_path = spath.resolve() if spath.is_dir() else spath.parent.resolve()
@@ -199,52 +196,6 @@ def parse_cli(argv: Optional[list[str]] = None):
 
 
 # ------------------------------------------------------------------------
-# validators
-# ------------------------------------------------------------------------
-def validate_type_key(type_key: str, src: Path, skip: Optional[str], et: ExifToolHelper):
-    """Ensure the chosen tag exists on all media files under a source."""
-    supported = False
-    for f in src.rglob("*"):
-        rel = f.relative_to(src)
-        if not f.is_file() or (skip and rel.parts[0] == skip):
-            continue
-        meta = et.get_metadata(str(f))[0]
-        tags = STREAMS.get(get_mime(meta), {})
-        if not tags:
-            cprint(f"Skip {rel} — unknown MIME", "warn")
-            continue
-        supported = True
-        if type_key not in tags:
-            sys.exit(f"Tag '{type_key}' not present in {rel}\n   (aborting)")
-    if not supported:
-        sys.exit("No supported media files found in source")
-
-
-def choose_stream_key(src: Path, skip: Optional[str], et: ExifToolHelper) -> str:
-    """Interactively choose a common metadata tag across all files."""
-    common: Optional[set[str]] = None
-    for f in src.rglob("*"):
-        rel = f.relative_to(src)
-        if not f.is_file() or (skip and rel.parts[0] == skip):
-            continue
-        meta = et.get_metadata(str(f))[0]
-        tags = STREAMS.get(get_mime(meta))
-        if not tags:
-            continue
-        keys = {k for k in tags.keys() if k != "fname"}
-        common = keys if common is None else common & keys
-        if not common:
-            break
-    if not common:
-        sys.exit("No common tag across files; use -t")
-    while True:
-        choice = input(f"Pick tag {sorted(common)}: ").strip()
-        if choice in common:
-            return choice
-        print("Invalid selection, try again")
-
-
-# ------------------------------------------------------------------------
 # core synchronisation
 # ------------------------------------------------------------------------
 def synchronise_file(
@@ -263,11 +214,11 @@ def synchronise_file(
         raise RuntimeError(f"Unknown MIME '{mime}'")
 
     if manual_ts:
+        main_tag = "File:Manual"
         main_val = manual_ts
-        main_tag = tag_map.get("fmodify") if stream_key == "fname" else tag_map[stream_key]
     elif stream_key == "fname":
+        main_tag = tag_map[stream_key]
         main_val = ts_from_fname(src_file.stem)
-        main_tag = tag_map["fmodify"]
     else:
         main_tag = tag_map[stream_key]
         main_val = meta.get(main_tag)
@@ -281,29 +232,21 @@ def synchronise_file(
     if stream_key == "fname":
         base_name = src_file.stem + src_file.suffix.lower()
     else:
-        base_name = format_timestamp(main_val) + src_file.suffix.lower()
+        base_name = fname_from_ts(main_val) + src_file.suffix.lower()
     unique_final = ensure_unique(dst_dir / base_name)
     unique_name = unique_final.name
     new_path = unique_final
 
     other_tags = {tag: main_val for tag in tag_map.values()}
-    other_tags.pop("File:FileName", None)
     other_tags["File:FileName"] = unique_name
 
     old_vals = {tag: meta.get(tag) for tag in tag_map.values()}
-
-    try:
-        shutil.copy2(src_file, new_path)
-    except FileExistsError:
-        unique_final = ensure_unique(dst_dir / unique_name)
-        unique_name = unique_final.name
-        new_path = unique_final
-        other_tags["File:FileName"] = unique_name
-        shutil.copy2(src_file, new_path)
+    shutil.copy2(src_file, new_path)
 
     if not _NO_WRITE_META:
+        params = ["-overwrite_original", "-api", "QuickTimeUTC"]
         try:
-            et.set_tags([str(new_path)], tags=other_tags, params=["-overwrite_original"])
+            et.set_tags([str(new_path)], tags=other_tags, params=params)
         except ExifToolExecuteError:
             new_path.unlink()
             raise
@@ -389,13 +332,9 @@ def run_batch_sync(args):
 
     with ExifToolHelper() as et:
         if args.manual_ts:
-            stream_key = "fmodify"
+            stream_key = "fmanual"
         elif args.type_key:
-            # if not args.force:
-            # validate_type_key(args.type_key, args.src_path, args.skip_top_dir, et)
             stream_key = args.type_key
-        else:
-            stream_key = choose_stream_key(args.src_path, args.skip_top_dir, et)
 
         cprint(f"Using tag: {stream_key}", "info")
 
@@ -408,21 +347,21 @@ def run_batch_sync(args):
                 new_file, tag_full, val, old_vals = synchronise_file(
                     f, args.src_path, args.dst_path, stream_key, et, args.manual_ts)
             except Exception as exc:
-                cprint(f"[ERR] Skip {rel} → {exc}", "warn")
+                cprint(f"Skip {rel} → {exc}", "warn")
                 continue
 
-            cprint(f"[ok] {rel} → {new_file.relative_to(args.dst_path)} ({tag_full} = {val})", "info")
+            cprint(f"OK {rel} → {new_file.relative_to(args.dst_path)} ({tag_full} = {val})", "info")
 
             if args.remove_source:
                 try:
                     f.unlink()
-                    cprint(f"[removed file] {rel}", "info")
+                    cprint(f"REMOVED {rel}", "info")
                     parent = f.parent
 
                     while parent != args.src_path and not any(parent.iterdir()):
                         parent_rel = parent.relative_to(args.src_path)
                         parent.rmdir()
-                        cprint(f"[removed dir] {parent_rel}", "info")
+                        cprint(f"REMOVED DIR {parent_rel}", "info")
                         parent = parent.parent
                 except Exception as e:
                     cprint(f"Failed to clean up {rel} or its dirs: {e}", "warn")
