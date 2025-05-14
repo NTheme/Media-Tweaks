@@ -18,6 +18,7 @@ import shutil
 import sys
 import logging
 from datetime import datetime
+from PIL import Image
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -249,7 +250,13 @@ def synchronise_file(
             et.set_tags([str(new_path)], tags=other_tags, params=params)
         except ExifToolExecuteError:
             new_path.unlink()
-            raise
+            img = Image.open(src_file)
+            img.save(new_path, format="JPEG", quality=100, subsampling=0, optimize=False)
+            try:
+                et.set_tags([str(new_path)], tags=other_tags, params=params)
+            except ExifToolExecuteError:
+                new_path.unlink()
+                raise
 
     return new_path, main_tag, main_val, old_vals
 
@@ -288,7 +295,7 @@ def show_example_info(args):
             cprint("Requested tag not applicable to this file", "warn")
         return
 
-    import json  # lazy load
+    import json
     if args.all:
         print(json.dumps(meta, indent=2, ensure_ascii=False))
     else:
