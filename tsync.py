@@ -29,7 +29,7 @@ from exiftool.exceptions import ExifToolExecuteError
 # ------------------------------------------------------------------------
 # configuration & constants
 # ------------------------------------------------------------------------
-DEFAULT_SRC = "/home/ntheme/Data1/Temp/Sorting"
+DEFAULT_SRC = "/home/ntheme/Data2/Temp/Sorting"
 DEFAULT_DST = "adjusted"
 
 _VERBOSE = False
